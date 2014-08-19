@@ -1,18 +1,18 @@
-""" Unit tests for rave_pyart.py module. """
+""" Unit tests for baltrad_pyart_bridge.py module. """
 
 import numpy as np
 from numpy.testing import assert_array_equal, assert_allclose
 
-import rave_pyart
+import baltrad_pyart_bridge as bridge
 import _raveio
 
 SCAN_FILENAME = 'data/Example_scan.h5'
 PVOL_FILENAME = 'data/Example_pvol.h5'
 
 
-def test_read_pvol():
+def test_raveio2radar_pvol():
     rio = _raveio.open(PVOL_FILENAME)
-    radar = rave_pyart.toPyART(rio)
+    radar = bridge.raveio2radar(rio)
 
     # latitude, longitude, altitude
     assert round(radar.latitude['data'], 2) == 58.11
