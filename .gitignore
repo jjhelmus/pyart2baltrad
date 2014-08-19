@@ -1,2 +1,3 @@
 *.pyc
 sandbox
+.ipynb_checkpoints
