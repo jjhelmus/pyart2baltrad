@@ -160,41 +160,63 @@ def _fillscan(scan, radar, index=0):
 ## Reads an ODIM_H5 file and returns a Py-ART radar object
 # @param rio RaveIO object
 # @return radar object
-def raveio2radar(rio):
-    """ Map a RaveIO object to a Py-ART Radar. """
+def raveio2radar(rio, raw=False):
+    """
+    Map a RaveIO object to a Py-ART Radar.
+
+    Parameters
+    ----------
+    rio : RaveIOCore
+        RaveIO object to read data from.
+    raw : bool
+        True to return unmasked, unscaled data.  False returns data
+        with gain, offset and mask applied.
+
+    Returns
+    -------
+    radar : Radar
+        Py-ART radar object containting data.
+
+    """
 
     # create metadata retrieval object
+    # TODO default mappings, metadata, etc
+    # TODO proper Py-ART reading (file_field_name, etc)
     filemetadata = FileMetadata('odim_h5')
 
     # determine some key parameters
-    hfile = rio.object
-
     if rio.objectType is _rave.Rave_ObjectType_SCAN:
         nsweeps = 1
         first_scan = rio.object
     elif rio.objectType is _rave.Rave_ObjectType_PVOL:
-        nsweeps = hfile.getNumberOfScans()
+        nsweeps = rio.object.getNumberOfScans()
         first_scan = rio.object.getScan(0)
     else:
         raise TypeError(
             "Unsupported object, only SCANs and PVOLs supported.")
     rays_per_sweep = _collect_attrs(rio, 'nrays')
+    total_rays = np.sum(rays_per_sweep)
+    bins_per_sweep = np.array(_collect_attrs(rio, 'nbins'))
+    max_bins = np.max(bins_per_sweep)   # maximim number of bins in any sweep.
+    #if np.any(bins_per_sweep != max_bins):
+        # TODO fix to support non-uniform number of bins with masking
+    #    raise NotImplementedError('Non-uniform bins not supported yet')
 
     # latitude, longitude and altitude
     latitude = filemetadata('latitude')
     longitude = filemetadata('longitude')
     altitude = filemetadata('altitude')
-    latitude['data'] = np.array([hfile.latitude*rd])
-    longitude['data'] = np.array([hfile.longitude*rd])
-    altitude['data'] = np.array([hfile.height])
+    latitude['data'] = np.array([first_scan.latitude * rd])
+    longitude['data'] = np.array([first_scan.longitude * rd])
+    altitude['data'] = np.array([first_scan.height])
 
     # metadata
     metadata = filemetadata('metadata')
-    metadata['source'] = hfile.source
+    metadata['source'] = first_scan.source
     metadata['original_container'] = 'odim_h5'
 
     # sweep_start_ray_index, sweep_end_ray_index
-    # Not to be confused with where/a1gate!
+    # Not to be confused with where/a1gate
     sweep_start_ray_index = filemetadata('sweep_start_ray_index')
     sweep_end_ray_index = filemetadata('sweep_end_ray_index')
     sweep_start_ray_index['data'] = np.cumsum(
@@ -213,34 +235,29 @@ def raveio2radar(rio):
     # scan_type
     scan_type = 'ppi'
 
-    # fixed_angle
+    # fixed_angle, elevation
     sweep_el = np.array(_collect_attrs(rio, 'elangle')) * rd
     fixed_angle = filemetadata('fixed_angle')
+    elevation = filemetadata('elevation')
     fixed_angle['data'] = np.array(sweep_el, dtype='float32')
-
-    # elevation
     # A better solution is to use the elevation angles for each ray if
     # available in how/startelA, how/stopelA in ODIM_H5 v2.2
-    elevation = filemetadata('elevation')
-    elevation['data'] = np.repeat(sweep_el, rays_per_sweep)
+    elevation['data'] = np.repeat(sweep_el, rays_per_sweep).astype('float32')
 
     # range
-    _range = filemetadata('range')
-    obj = first_scan
-    # TODO fix to support non-uniform number of bins with masking
-    # Check that gate spacing is constant for all scans in the pvol
-    # Py-ART Radar object do not support radar data where the gate spacing
-    # is not constant for all radials.
-    # Data of this type should raises an exception.
+    # Check that gate spacing is constant for all scans.
+    # The Py-ART Radar object does not support radar data where the
+    # gate spacing is not constant for all radials.
+    # Data of this type raises a TypeError exception.
     rscales = np.array(_collect_attrs(rio, 'rscale'))
     rstarts = np.array(_collect_attrs(rio, 'rstart'))
-    nbins = np.array(_collect_attrs(rio, 'nbins'))
-    if np.any(nbins != nbins[0]) or np.any(rscales[0] != rscales) or np.any(rstarts != rstarts[0]):
-            raise TypeError(
-                "Py-ART cannot handle volumes containing scans with",
-                "different (bin) gate spacings or dimensions.")
+    if np.any(rscales[0] != rscales) or np.any(rstarts != rstarts[0]):
+        raise TypeError(
+            "Py-ART cannot handle volumes containing scans with",
+            "different (bin) gate spacings.")
     # This is a generalization, but we'll live with it.
-    _range['data'] = (np.arange(nbins[0], dtype='float32') * rscales[0] +
+    _range = filemetadata('range')
+    _range['data'] = (np.arange(max_bins, dtype='float32') * rscales[0] +
                       rstarts[0])
     _range['meters_to_center_of_first_gate'] = float(rstarts[0])
     _range['meters_between_gates'] = float(rscales[0])
@@ -248,17 +265,14 @@ def raveio2radar(rio):
     # azimuth
     # azimuth angle for all rays collected in the volume
     azimuth = filemetadata('azimuth')
-    total_rays = np.sum(rays_per_sweep)
-    az_data = np.ones((np.sum(rays_per_sweep), ), dtype='float32')
-
-    nbins = obj.nbins
+    az_data = np.ones((total_rays, ), dtype='float32')
     # loop over the sweeps, store the starting azimuth angles.
     # an average of the startazA and stopazA would probably be a better
     # estimate, but the discontinuity between 0 and 360 would need to be
     # addressed. This is attempted if startazA is available.
     start = 0
     if rio.objectType is _rave.Rave_ObjectType_SCAN:
-        if 'how/startazA' in hfile.getAttributeNames():
+        if 'how/startazA' in first_scan.getAttributeNames():
             sweep_az = first_scan.getAttribute('how/startazA')
             sweep_az = np.where(np.greater(sweep_az, 360.0),
                                 sweep_az-360.0, sweep_az)
@@ -276,7 +290,8 @@ def raveio2radar(rio):
                 az_data[start:start+scan.nrays] = sweep_az
                 start += scan.nrays
             else:
-                az_data = np.arange(scan.nrays)+(360./scan.nrays/2)
+                az_data[start:start+scan.nrays] = (
+                    np.arange(scan.nrays)+(360./scan.nrays/2))
     azimuth['data'] = az_data
 
     # time
@@ -285,9 +300,6 @@ def raveio2radar(rio):
     # each sweep, just interpolate between these values.
     # XXX This is does not seem correct.
     _time = filemetadata('time')
-
-    # Remembering that obj is either a single scan or the
-    # first scan in the pvol
     attrnames = first_scan.getAttributeNames()
     if 'how/startepochs' in attrnames and 'how/stopepochs' in attrnames:
         start_epoch = first_scan.getAttribute('how/startepochs')
@@ -304,44 +316,36 @@ def raveio2radar(rio):
     _time['data'] = np.linspace(0, delta_sec, total_rays).astype('float32')
 
     # fields
+    # This assumes that all fields are available in all scans and that
+    # the quantities are ordered the same way in each scan.
+    # This may not always be true and could cause issues. XXX
     fields = {}
-    # This tactic assumes that all quantities are available in all
-    # scans of the pvol, and that all quantities are ordered the
-    # same way in each scan. This is probably dangerous.
-    field_names = first_scan.getParameterNames()
-
-    # loop over the fields, create the field dictionary
-    for i, field_name in enumerate(field_names):
-        h_field_key = 'data%i' % (i+1)
-        # XXX still need to set metadata, some default field metadata can
-        # likely be provided form the filemetadata object.
-        field_dic = filemetadata(field_name)
+    rave_field_names = first_scan.getParameterNames()
+    # loop over the fields, create a field dictionary for each field
+    for i, rave_field_name in enumerate(rave_field_names):
         # Assumes the same dtype for each quantity. Potentially dangerous.
-        dtype = first_scan.getParameter(field_name).getData().dtype
-        field_dic['data'] = np.zeros((total_rays, nbins), dtype=dtype)
+        field_data = np.ma.zeros((total_rays, max_bins), dtype='float32')
         start = 0
-        # loop over the sweeps, copy data into correct location in
-        # data array
+        # loop over the sweeps, copy data into correct location of data array
         if rio.objectType is _rave.Rave_ObjectType_SCAN:
-            sweep_data = first_scan.getParameter(field_name).getData()
-            field_dic['data'][start:start + first_scan.nrays] = sweep_data[:]
+            sweep_data = _get_scan_data(first_scan, rave_field_name, raw)
+            field_data[start:start + first_scan.nrays] = sweep_data[:]
         elif rio.objectType is _rave.Rave_ObjectType_PVOL:
-            for i in range(rio.object.getNumberOfScans()):
+            for i in range(nsweeps):
                 scan = rio.object.getScan(i)
-                sweep_data = scan.getParameter(field_name).getData()
-                param = scan.getParameter(field_name)
-                scaled_sweep_data = (sweep_data[:] * param.gain +
-                                     param.offset)
-                field_dic['data'][start:start + scan.nrays] = (
-                    scaled_sweep_data[:])
+                sweep_data = _get_scan_data(scan, rave_field_name, raw)
+                field_data[start:start+scan.nrays, :scan.nbins] = sweep_data[:]
+                field_data[start:start+scan.nrays, scan.nbins:] = np.ma.masked
                 start += scan.nrays
-        fields[field_name] = field_dic
+        field_dic = filemetadata(rave_field_name)
+        field_dic['data'] = field_data
+        fields[rave_field_name] = field_dic
 
     # instrument_parameters
     beam_width_h = filemetadata.get_metadata('radar_beam_width_h')
-    beam_width_h['data'] = np.array([hfile.beamwidth * rd], dtype='float32')
-
-    # TODO unambiguous_range (nyquist)
+    beam_width_h['data'] = np.array([first_scan.beamwidth * rd],
+                                    dtype='float32')
+    # TODO unambiguous_range (nyquist), etc
     instrument_parameters = {'radar_beam_width_h': beam_width_h}
 
     return Radar(
@@ -353,13 +357,26 @@ def raveio2radar(rio):
         instrument_parameters=instrument_parameters)
 
 
-def _collect_attrs(rio, attr):
+def _get_scan_data(scan, parameter, raw=False):
+    """ Get data from a RaveIO scan, apply gain, offset and mask. """
+    param = scan.getParameter(parameter)
+    scan_data = param.getData()
+    if scan_data.dtype == np.int16:     # XXX Hack
+        scan_data.dtype = np.uint16
+    if raw:
+        return scan_data
+    masked_scan_data = np.ma.masked_array(scan_data)
+    masked_scan_data[scan_data == param.nodata] = np.ma.masked
+    masked_scan_data[scan_data == param.undetect] = np.ma.masked
+    scaled_masked_scan_data = masked_scan_data * param.gain + param.offset
+    return scaled_masked_scan_data
 
+
+def _collect_attrs(rio, attr):
+    """ Create a list of an attribute for all scans of a RaveIO object. """
     if rio.objectType is _rave.Rave_ObjectType_SCAN:
         collected = [getattr(rio.object, attr)]
     elif rio.objectType is _rave.Rave_ObjectType_PVOL:
         collected = [getattr(rio.object.getScan(i), attr) for i in
                      range(rio.object.getNumberOfScans())]
     return collected
-
-

@@ -10,6 +10,11 @@ SCAN_FILENAME = 'data/Example_scan.h5'
 PVOL_FILENAME = 'data/Example_pvol.h5'
 
 
+def test_raveio2radar_scan():
+    rio = _raveio.open(SCAN_FILENAME)
+    radar = bridge.raveio2radar(rio)
+
+
 def test_raveio2radar_pvol():
     rio = _raveio.open(PVOL_FILENAME)
     radar = bridge.raveio2radar(rio)
