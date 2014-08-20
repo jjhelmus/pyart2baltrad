@@ -171,11 +171,14 @@ def raveio2radar(rio):
 
     if rio.objectType is _rave.Rave_ObjectType_SCAN:
         nsweeps = 1
+        first_scan = rio.object
     elif rio.objectType is _rave.Rave_ObjectType_PVOL:
         nsweeps = hfile.getNumberOfScans()
+        first_scan = rio.object.getScan(0)
     else:
         raise TypeError(
             "Unsupported object, only SCANs and PVOLs supported.")
+    rays_per_sweep = _collect_attrs(rio, 'nrays')
 
     # latitude, longitude and altitude
     latitude = filemetadata('latitude')
@@ -190,21 +193,8 @@ def raveio2radar(rio):
     metadata['source'] = hfile.source
     metadata['original_container'] = 'odim_h5'
 
-    # Datasets, read with each sweep
-    datasets = []
-    if rio.objectType is _rave.Rave_ObjectType_SCAN:
-        datasets.append(unicode("dataset1"))
-    elif rio.objectType is _rave.Rave_ObjectType_PVOL:
-        for i in range(rio.object.getNumberOfScans()):
-            datasets.append(unicode("dataset%i" % (i+1)))
-
     # sweep_start_ray_index, sweep_end_ray_index
     # Not to be confused with where/a1gate!
-    if rio.objectType is _rave.Rave_ObjectType_SCAN:
-        rays_per_sweep = [hfile.nrays-1]
-    elif rio.objectType is _rave.Rave_ObjectType_PVOL:
-        rays_per_sweep = [hfile.getScan(i).nrays for i in range(nsweeps)]
-
     sweep_start_ray_index = filemetadata('sweep_start_ray_index')
     sweep_end_ray_index = filemetadata('sweep_end_ray_index')
     sweep_start_ray_index['data'] = np.cumsum(
@@ -224,12 +214,8 @@ def raveio2radar(rio):
     scan_type = 'ppi'
 
     # fixed_angle
+    sweep_el = np.array(_collect_attrs(rio, 'elangle')) * rd
     fixed_angle = filemetadata('fixed_angle')
-    sweep_el = []
-    if rio.objectType is _rave.Rave_ObjectType_SCAN:
-        sweep_el = [hfile.elangle*rd]
-    elif rio.objectType is _rave.Rave_ObjectType_PVOL:
-        sweep_el = [hfile.getScan(i).elangle * rd for i in range(nsweeps)]
     fixed_angle['data'] = np.array(sweep_el, dtype='float32')
 
     # elevation
@@ -240,31 +226,30 @@ def raveio2radar(rio):
 
     # range
     _range = filemetadata('range')
-    if rio.objectType is _rave.Rave_ObjectType_SCAN:
-        obj = hfile
-    elif rio.objectType is _rave.Rave_ObjectType_PVOL:
-        obj = hfile.getScan(0)
-        # Check that gate spacing is constant for all scans in the pvol
-        # Py-ART Radar object do not support radar data where the gate spacing
-        # is not constant for all radials.
-        # Data of this type should raises an exception.
-        rscales = np.array([hfile.getScan(i).rscale for i in range(nsweeps)])
-        nbins = np.array([hfile.getScan(i).nbins for i in range(nsweeps)])
-        if np.any(nbins != nbins[0]) or np.any(rscales[0] != rscales):
+    obj = first_scan
+    # TODO fix to support non-uniform number of bins with masking
+    # Check that gate spacing is constant for all scans in the pvol
+    # Py-ART Radar object do not support radar data where the gate spacing
+    # is not constant for all radials.
+    # Data of this type should raises an exception.
+    rscales = np.array(_collect_attrs(rio, 'rscale'))
+    rstarts = np.array(_collect_attrs(rio, 'rstart'))
+    nbins = np.array(_collect_attrs(rio, 'nbins'))
+    if np.any(nbins != nbins[0]) or np.any(rscales[0] != rscales) or np.any(rstarts != rstarts[0]):
             raise TypeError(
                 "Py-ART cannot handle volumes containing scans with",
                 "different (bin) gate spacings or dimensions.")
     # This is a generalization, but we'll live with it.
-    _range['data'] = (np.arange(obj.nbins, dtype='float32') * obj.rscale +
-                      obj.rstart)
-    _range['meters_to_center_of_first_gate'] = obj.rstart
-    _range['meters_between_gates'] = obj.rscale
+    _range['data'] = (np.arange(nbins[0], dtype='float32') * rscales[0] +
+                      rstarts[0])
+    _range['meters_to_center_of_first_gate'] = float(rstarts[0])
+    _range['meters_between_gates'] = float(rscales[0])
 
     # azimuth
     # azimuth angle for all rays collected in the volume
     azimuth = filemetadata('azimuth')
     total_rays = np.sum(rays_per_sweep)
-    az_data = np.ones((total_rays, ), dtype='float32')
+    az_data = np.ones((np.sum(rays_per_sweep), ), dtype='float32')
 
     nbins = obj.nbins
     # loop over the sweeps, store the starting azimuth angles.
@@ -272,122 +257,91 @@ def raveio2radar(rio):
     # estimate, but the discontinuity between 0 and 360 would need to be
     # addressed. This is attempted if startazA is available.
     start = 0
-
     if rio.objectType is _rave.Rave_ObjectType_SCAN:
         if 'how/startazA' in hfile.getAttributeNames():
-            sweep_az = obj.getAttribute('how/startazA')
-            # + (obj.beamwidth*rd*0.5)
+            sweep_az = first_scan.getAttribute('how/startazA')
             sweep_az = np.where(np.greater(sweep_az, 360.0),
                                 sweep_az-360.0, sweep_az)
-            az_data[start:start+obj.nrays] = sweep_az
+            az_data[start:start+first_scan.nrays] = sweep_az
         else:
-            az_data = np.arange(obj.nrays)+(360./obj.nrays/2)
+            az_data = np.arange(first_scan.nrays)+(360./first_scan.nrays/2)
 
     elif rio.objectType is _rave.Rave_ObjectType_PVOL:
         for s in range(nsweeps):
-            scan = hfile.getScan(s)
+            scan = rio.object.getScan(s)
             if 'how/startazA' in scan.getAttributeNames():
                 sweep_az = scan.getAttribute('how/startazA')
-                #+(scan.beamwidth*rd*0.5)
                 sweep_az = np.where(np.greater(sweep_az, 360.0),
                                     sweep_az-360.0, sweep_az)
                 az_data[start:start+scan.nrays] = sweep_az
                 start += scan.nrays
             else:
                 az_data = np.arange(scan.nrays)+(360./scan.nrays/2)
-
     azimuth['data'] = az_data
 
     # time
-    # time at which each ray was collected.  Need to define
-    # starting time and the units of the data in the 'unit' dictionary
-    # element.
     # Since startazT and stopazT do not appear to be present in all files
     # and the startepochs and endepochs attributes appear the same for
     # each sweep, just interpolate between these values.
     # XXX This is does not seem correct.
-    # Assuming these are UTC times
     _time = filemetadata('time')
 
     # Remembering that obj is either a single scan or the
     # first scan in the pvol
-    attrnames = obj.getAttributeNames()
+    attrnames = first_scan.getAttributeNames()
     if 'how/startepochs' in attrnames and 'how/stopepochs' in attrnames:
-        start_epoch = obj.getAttribute('how/startepochs')
-        end_epoch = obj.getAttribute('how/stopepochs')
+        start_epoch = first_scan.getAttribute('how/startepochs')
+        end_epoch = first_scan.getAttribute('how/stopepochs')
     else:
         start_epoch = time.mktime(datetime.datetime.strptime(
-            obj.startdate+obj.starttime, "%Y%m%d%H%M%S").timetuple())
+            first_scan.startdate+first_scan.starttime,
+            "%Y%m%d%H%M%S").timetuple())
         end_epoch = time.mktime(datetime.datetime.strptime(
-            obj.enddate+obj.endtime, "%Y%m%d%H%M%S").timetuple())
+            first_scan.enddate+first_scan.endtime, "%Y%m%d%H%M%S").timetuple())
     start_time = datetime.datetime.utcfromtimestamp(start_epoch)
     delta_sec = end_epoch - start_epoch
     _time['units'] = make_time_unit_str(start_time)
     _time['data'] = np.linspace(0, delta_sec, total_rays).astype('float32')
 
     # fields
-    # the radar moments or fields are stored in as a dictionary of
-    # dictionaries.  The dictionary for each field, a 'field dictionary'
-    # should contain any necessary metadata.  The actual data is stored in
-    # the 'data' key as a 2D array of size (nrays, ngates) where nrays is the
-    # total number of rays in all sweeps of the volume, and ngate is the
-    # number of bins or gates in each radial.
     fields = {}
-    if rio.objectType in (_rave.Rave_ObjectType_SCAN,
-                          _rave.Rave_ObjectType_PVOL):
-        h_field_keys = []
-        if rio.objectType is _rave.Rave_ObjectType_SCAN:
-            field_names = obj.getParameterNames()
-        elif rio.objectType is _rave.Rave_ObjectType_PVOL:
-            # This tactic assumes that all quantities are available in all
-            # scans of the pvol, and that all quantities are ordered the
-            # same way in each scan. This is probably dangerous.
-            field_names = hfile.getScan(0).getParameterNames()
-        for i in range(len(field_names)):
-            h_field_keys.append(unicode('data%i' % (i+1)))  # matching order
+    # This tactic assumes that all quantities are available in all
+    # scans of the pvol, and that all quantities are ordered the
+    # same way in each scan. This is probably dangerous.
+    field_names = first_scan.getParameterNames()
 
-        # loop over the fields, create the field dictionary
-        for field_name, h_field_key in zip(field_names, h_field_keys):
-            # XXX still need to set metadata, some default field metadata can
-            # likely be provided form the filemetadata object.
-            #field_dic = filemetadata(field_name)
-            field_dic = {}
-            # Assumes the same dtype for each quantity. Potentially dangerous.
-            if rio.objectType is _rave.Rave_ObjectType_SCAN:
-                dtype = obj.getParameter(field_name).getData().dtype
-            elif rio.objectType is _rave.Rave_ObjectType_PVOL:
-                dtype = hfile.getScan(0).getParameter(
-                    field_name).getData().dtype
-            field_dic['data'] = np.zeros((total_rays, nbins), dtype=dtype)
-            start = 0
-            # loop over the sweeps, copy data into correct location in
-            # data array
-            if rio.objectType is _rave.Rave_ObjectType_SCAN:
-                sweep_data = obj.getParameter(field_name).getData()
-                field_dic['data'][start:start + obj.nrays] = sweep_data[:]
-            elif rio.objectType is _rave.Rave_ObjectType_PVOL:
-                for i in range(hfile.getNumberOfScans()):
-                    scan = hfile.getScan(i)
-                    sweep_data = scan.getParameter(field_name).getData()
-                    param = scan.getParameter(field_name)
-                    scaled_sweep_data = (sweep_data[:] * param.gain +
-                                         param.offset)
-                    field_dic['data'][start:start + scan.nrays] = (
-                        scaled_sweep_data[:])
-                    start += scan.nrays
-            fields[field_name] = field_dic
+    # loop over the fields, create the field dictionary
+    for i, field_name in enumerate(field_names):
+        h_field_key = 'data%i' % (i+1)
+        # XXX still need to set metadata, some default field metadata can
+        # likely be provided form the filemetadata object.
+        field_dic = filemetadata(field_name)
+        # Assumes the same dtype for each quantity. Potentially dangerous.
+        dtype = first_scan.getParameter(field_name).getData().dtype
+        field_dic['data'] = np.zeros((total_rays, nbins), dtype=dtype)
+        start = 0
+        # loop over the sweeps, copy data into correct location in
+        # data array
+        if rio.objectType is _rave.Rave_ObjectType_SCAN:
+            sweep_data = first_scan.getParameter(field_name).getData()
+            field_dic['data'][start:start + first_scan.nrays] = sweep_data[:]
+        elif rio.objectType is _rave.Rave_ObjectType_PVOL:
+            for i in range(rio.object.getNumberOfScans()):
+                scan = rio.object.getScan(i)
+                sweep_data = scan.getParameter(field_name).getData()
+                param = scan.getParameter(field_name)
+                scaled_sweep_data = (sweep_data[:] * param.gain +
+                                     param.offset)
+                field_dic['data'][start:start + scan.nrays] = (
+                    scaled_sweep_data[:])
+                start += scan.nrays
+        fields[field_name] = field_dic
 
     # instrument_parameters
-    # this is also a dictionary of dictionaries which contains
-    # instrument parameter like wavelength, PRT rate, nyquist velocity, etc.
-    # A full list of possible parameters can be found in section 5.1 of
-    # the CF/Radial document.
-    # prt, prt_mode, unambiguous_range, and nyquist_velocity are the
-    # parameters which we try to set in Py-ART although a valid Radar object
-    # can be created with fewer or more parameters
     beam_width_h = filemetadata.get_metadata('radar_beam_width_h')
     beam_width_h['data'] = np.array([hfile.beamwidth * rd], dtype='float32')
 
+    # TODO unambiguous_range (nyquist)
     instrument_parameters = {'radar_beam_width_h': beam_width_h}
 
     return Radar(
@@ -397,3 +351,15 @@ def raveio2radar(rio):
         sweep_end_ray_index,
         azimuth, elevation,
         instrument_parameters=instrument_parameters)
+
+
+def _collect_attrs(rio, attr):
+
+    if rio.objectType is _rave.Rave_ObjectType_SCAN:
+        collected = [getattr(rio.object, attr)]
+    elif rio.objectType is _rave.Rave_ObjectType_PVOL:
+        collected = [getattr(rio.object.getScan(i), attr) for i in
+                     range(rio.object.getNumberOfScans())]
+    return collected
+
+
