@@ -105,7 +105,7 @@ def _fillscan(scan, radar, index=0):
     scan.elangle = radar.elevation["data"][startray] * dr
     scan.rstart = float(radar.range["meters_to_center_of_first_gate"])
     scan.rscale = float(radar.range["meters_between_gates"])
-    scan.a1gate = np.argmin(sweep_times) + startray
+    scan.a1gate = int(np.argmin(sweep_times) + startray)
     # These are not settable in RAVE
     #scan.nrays = stopray - startray + 1
     #scan.nbins = radar.ngates
